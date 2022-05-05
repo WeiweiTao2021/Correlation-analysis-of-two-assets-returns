@@ -1,0 +1,503 @@
+---
+title: "AMS 691 Final Project - correlation analysis"
+author: "Weiwei Tao"
+date: "May 05, 2022"
+output:
+  html_document:
+    df_print: paged
+    always_allow_html: yes
+  word_document: default
+  pdf_document:
+    fig_caption: yes
+---
+```{r packages, echo=FALSE,include=FALSE}
+# clear variable environment
+rm(list=ls(all=TRUE))
+
+options(scipen = 5)
+options(digits=4)
+
+# load all packages
+list.of.packages <- c("tableone","dplyr","readxl", "stringr", "tidyr",  "merTools",
+                      "mlmRev", "lme4", "parallel", "kableExtra", "ggplot2", "PerformanceAnalytics", "tidyquant",
+                      "quantmod",  "car", "FinTS", "tidyverse","dygraphs", "xts",
+                      "gridExtra", "grid", "lattice", "formatR", "htmltools", "zoo",
+                      "plotly", "rugarch", "rmgarch")
+
+# check whether required packages were installed, if not install it.
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+lapply(list.of.packages, library, character.only=TRUE)
+
+# set directory to current project directory
+knitr::opts_knit$set(root.dir = '/tmp')
+
+# function for table presentation
+kable1 <- function(x, caption, font_size) {
+  capture.output(x <- print(x, printToggle=FALSE,
+                            noSpaces=FALSE, showAllLevels=TRUE,
+                            test=TRUE, varLabels=TRUE))
+  knitr::kable(x, caption = caption) %>%
+    kable_styling(bootstrap_options = c("condensed", "hover"), font_size = font_size)
+}
+
+proper = function(x) paste0(toupper(substr(x, 1, 1)), tolower(substring(x, 2)))
+
+```
+
+## Introduction
+Financial decision makers usually deal with many financial assets simultaneously. Modelling individual time series separately is thus an insufficient method as it leaves out information about co-movements and interactions between the instruments of interest. 
+
+In this project, we are going to study the trend of prices and returns in $S\&P$ 500 Index, Gold, Bitcoin and Ehtereum. The main goal is to evaluate the correlation change between the stock index and the other three potential safe-haven assets especially after COVID-19 outbreak.
+
+## Data Source
+We use daily data over the period from March the 22th, 2017 to April the 27th, 2022 (03/23-04/27/2022 is left for validation), and calculate the returns by $R_t = \frac{P_t}{P_{t-1}} - 1$. When merging the data at the data preparation stage, we left only those observations that were present in all series (i.e. those which had been missing in at least one series were deleted). The gold and index data were collected from Yahoo’s finance website while the Bitcoin and Ehtereum data were obtained from coinmarketcap. We construct return data using the corresponding close (or adjusted close) price data. The final dataset contains 1257 observations in total.
+```{r,echo=FALSE,include=TRUE, tidy=TRUE, message = FALSE, warning = FALSE}
+directory <- "/Users/weiweitao/Desktop/Stony Brook/2022 Spring Courses/AMS 691/course project/Analysis"
+SPX <- read.csv(file = paste0(directory, '/SPX.csv'))
+SPX$Date <- as.Date(SPX$Date, format = "%m/%d/%Y")
+SPX <- SPX %>% remove_rownames %>% column_to_rownames(var="Date")
+SPX = SPX[, "Close.Last", drop=F]
+colnames(SPX) <- c("SPX_close_price")
+
+GOLD <- read.csv(file = paste0(directory, '/GOLD.csv'))
+GOLD <- GOLD[GOLD$Date != "",]
+GOLD$Date <- as.Date(GOLD$Date, format = "%d-%b-%y")
+GOLD <- GOLD %>% remove_rownames %>% column_to_rownames(var="Date")
+GOLD = GOLD[, "Adj.Close..", drop=F]
+colnames(GOLD) <- c("GOLD_close_price")
+
+BTC <- read.csv(file = paste0(directory, '/BTC.csv'))
+BTC$Date <- as.Date(BTC$Date, format = "%Y-%m-%d")
+BTC <- BTC %>% remove_rownames %>% column_to_rownames(var="Date")
+BTC = BTC[, "Adj.Close", drop=F]
+colnames(BTC) <- c("BTC_close_price")
+
+
+ETH <- read.csv(file = paste0(directory, '/ETH.csv'))
+ETH$Date <- as.Date(ETH$Date, format = "%d-%b-%y")
+ETH <- ETH %>% remove_rownames %>% column_to_rownames(var="Date")
+ETH = ETH[, "Close..", drop=F]
+colnames(ETH) <- c("ETH_close_price")
+
+BTC$BTC_close_price <- as.numeric(gsub('[$,]', '', BTC$BTC_close_price))
+GOLD$GOLD_close_price <- as.numeric(gsub('[$,]', '', GOLD$GOLD_close_price))
+ETH$ETH_close_price <- as.numeric(gsub('[$,]', '', ETH$ETH_close_price))
+
+merge.all <- function(x, ..., by = "row.names") {
+  L <- list(...)
+  for (i in seq_along(L)) {
+    x <- merge(x, L[[i]], by = by)
+    rownames(x) <- x$Row.names
+    x$Row.names <- NULL
+  }
+  return(x)
+}
+
+Prices <- merge.all(GOLD, SPX, BTC, ETH)
+Prices$date <- as.Date(rownames(Prices))
+```
+
+```{r,echo=FALSE,include=TRUE, tidy=TRUE, message = FALSE, warning = FALSE}
+return.cal <- function(var, period, name){
+  return(Prices %>%
+    tq_transmute(select = var,
+                 mutate_fun = periodReturn,
+                 period = period,      # This argument calculates Monthly returns
+                 col_rename = name))
+  
+}
+gold.ret.daily <- return.cal(GOLD_close_price, "daily", "gold_daily")
+gold.ret.weekly <- return.cal(GOLD_close_price, "weekly", "gold_weekly")
+gold.ret.monthly <- return.cal(GOLD_close_price, "monthly", "gold_monthly")
+
+spx.ret.daily <- return.cal(SPX_close_price, "daily", "spx_daily")
+spx.ret.weekly <- return.cal(SPX_close_price, "weekly", "spx_weekly")
+spx.ret.monthly <- return.cal(SPX_close_price, "monthly", "spx_monthly")
+
+btc.ret.daily <- return.cal(BTC_close_price, "daily", "btc_daily")
+btc.ret.weekly <- return.cal(BTC_close_price, "weekly", "btc_weekly")
+btc.ret.monthly <- return.cal(BTC_close_price, "monthly", "btc_monthly")
+
+eth.ret.daily <- return.cal(ETH_close_price, "daily", "eth_daily")
+eth.ret.weekly <- return.cal(ETH_close_price, "weekly", "eth_weekly")
+eth.ret.monthly <- return.cal(ETH_close_price, "monthly", "eth_monthly")
+
+ret.daily <- merge.all(gold.ret.daily, spx.ret.daily, btc.ret.daily, eth.ret.daily, by="date")
+ret.weekly <- merge.all(gold.ret.weekly, spx.ret.weekly, btc.ret.weekly, eth.ret.weekly, by="date")
+ret.monthly <- merge.all(gold.ret.monthly, spx.ret.monthly, btc.ret.monthly, eth.ret.monthly, by="date")
+```
+
+We now document main statistical properties of the time series for the returns of SPX, Gold, Bitcoin, and Ethereum. Figure 1 plots the price movements for each of the four assets. Stock price experienced a large drop in March 2020 during the pandemic outbreak while Bitcoin and Ethereum's prices were not affected much by the outbreak of COVID-19. In early 2022, stock price experience a second sharp turbulence. Interestingly, about 2 months before the drop in SPX, both Bitcoin and Ethereum crashed. Similar trend was not observed in gold price.
+```{r,echo=FALSE,include=TRUE, tidy=TRUE, message = FALSE, warning = FALSE, out.width='\\textwidth', fig.width=8,fig.height=5, fig.align='center', fig.cap = "Evolution of prices."}
+g1 <- ggplot(Prices, aes(x=date, y=SPX_close_price)) + geom_line(color="#E69F00") +
+  labs(y = "SPX adjusted close price", x= "")
+g2 <- ggplot(Prices, aes(x=date, y=GOLD_close_price)) + geom_line(color="#E69F00") +
+  labs(y = "Gold adjusted close price" , x= "")
+g3 <- ggplot(Prices, aes(x=date, y=BTC_close_price)) + geom_line(color="#E69F00") +
+  labs(y = "Bitcoin adjusted close price" , x= "")
+g4 <- ggplot(Prices, aes(x=date, y=ETH_close_price)) + geom_line(color="#E69F00") +
+  labs(y = "Ethereum adjusted close price", x= "")
+grid.arrange(g1, g2, g3, g4, ncol = 2, nrow = 2)
+
+```
+
+Table 1 and Figures 2-5 show the statistics of SPX at the daily, weekly, and monthly frequencies compared to gold, Bitcoin, and Ethereum. At the daily frequency, the mean return is 0.05 percent and the standard deviation is 1.24 percent; at the weekly frequency, the mean return is 0.25 percent and the standard deviation is 2.53 percent; at the monthly frequency, the mean return is 1.04 percent and the standard deviation is 4.58 percent. Both the means and the standard deviations are higher than gold at daily, weekly, monthly settings. However, its means and standard deviations are much smaller than that of Bitcoin and Ethereum.
+
+The Bitcoin and Ethereum returns are positively skewed at all frequencies in contrast to the stock returns which are negatively skewed. The skewness increases the most in Ethereum from 0.71 at the daily frequency to 2.05 at the monthly frequency. 
+
+```{r,echo=FALSE,include=TRUE,message = FALSE, warning = FALSE, out.width='\\textwidth', fig.width=8,fig.height=3, fig.align='center', fig.cap = "SPX Return Distributions."}
+p1 <- ggplot(ret.daily, aes(x=spx_daily))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed")+
+  geom_vline(aes(xintercept=mean(spx_daily)), color="red",
+             linetype="dashed")+
+  labs(x="S&P 500 daily return", y = "Count")
+
+p2 <- ggplot(ret.weekly, aes(x=spx_weekly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed")+
+  geom_vline(aes(xintercept=mean(spx_weekly)), color="red",
+             linetype="dashed")+
+  labs(x="S&P 500 weekly return", y = "Count")
+
+p3 <- ggplot(ret.monthly, aes(x=spx_monthly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed")+
+  geom_vline(aes(xintercept=mean(spx_monthly)), color="red",
+             linetype="dashed")+
+  labs(x="S&P 500 monthly return", y = "Count")
+
+grid.arrange(p1, p2, p3, nrow = 1)
+```
+
+```{r,echo=FALSE,include=TRUE,message = FALSE, warning = FALSE, out.width='\\textwidth', fig.width=8,fig.height=3, fig.align='center', fig.cap = "Gold Return Distributions."}
+
+p1 <- ggplot(ret.daily, aes(x=gold_daily))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed")+
+  geom_vline(aes(xintercept=mean(gold_daily)), color="red",
+             linetype="dashed")+
+  labs(x="Gold daily return", y = "Count")
+
+p2 <- ggplot(ret.weekly, aes(x=gold_weekly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed")+
+  geom_vline(aes(xintercept=mean(gold_weekly)), color="red",
+             linetype="dashed")+
+  labs(x="Gold weekly return", y = "Count")
+
+p3 <- ggplot(ret.monthly, aes(x=gold_monthly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed")+
+  geom_vline(aes(xintercept=mean(gold_monthly)), color="red",
+             linetype="dashed")+
+  labs(x="Gold monthly return", y = "Count")
+
+
+
+grid.arrange(p1, p2, p3, nrow = 1)
+```
+
+
+```{r,echo=FALSE,include=TRUE,message = FALSE, warning = FALSE, out.width='\\textwidth', fig.width=8,fig.height=3, fig.align='center', fig.cap = "Bitcoin Return Distributions."}
+
+p1 <- ggplot(ret.daily, aes(x=btc_daily))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed") +
+  geom_vline(aes(xintercept=mean(btc_daily)), color="red",
+             linetype="dashed")+
+  labs(x="Bitcoin daily return", y = "Count")
+
+p2 <- ggplot(ret.weekly, aes(x=btc_weekly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed") +
+  geom_vline(aes(xintercept=mean(btc_weekly)), color="red",
+             linetype="dashed")+
+  labs(x="Bitcoin weekly return", y = "Count")
+
+p3 <- ggplot(ret.monthly, aes(x=btc_monthly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed") +
+  geom_vline(aes(xintercept=mean(btc_monthly)), color="red",
+             linetype="dashed")+
+  labs(x="Bitcoin monthly return", y = "Count")
+
+grid.arrange(p1, p2, p3, nrow = 1)
+```
+
+```{r,echo=FALSE,include=TRUE,message = FALSE, warning = FALSE, out.width='\\textwidth', fig.width=8,fig.height=3, fig.align='center', fig.cap = "Ethereum Return Distributions."}
+p1 <- ggplot(ret.daily, aes(x=eth_daily))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed") +
+  geom_vline(aes(xintercept=mean(eth_daily)), color="red",
+             linetype="dashed")+
+  labs(x="Ethereum daily return", y = "Count")
+
+p2 <- ggplot(ret.weekly, aes(x=eth_weekly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed") +
+  geom_vline(aes(xintercept=mean(eth_weekly)), color="red",
+             linetype="dashed")+
+  labs(x="Ethereum weekly return", y = "Count")
+
+p3 <- ggplot(ret.monthly, aes(x=eth_monthly))+
+  geom_histogram(color="black", fill="lightblue",
+                 linetype="dashed") +
+  geom_vline(aes(xintercept=mean(eth_monthly)), color="red",
+             linetype="dashed")+
+  labs(x="Ethereum monthly return", y = "Count")
+
+grid.arrange(p1, p2, p3, nrow = 1)
+```
+
+```{r,echo=FALSE,include=TRUE}
+## generate summary statistics
+stat.sum <- function(data){
+  nout <- data.frame()
+  for(col in colnames(data)[-c(1)]){
+    a <- data.frame(str_to_title(col) , 
+                    sum(!is.na(data[col])),
+                    paste0(round(mean(data[,col])*100,2), "%"),
+                    paste0(round(sd(data[,col])*100,2), "%"),
+                    round(t.test(data[,col])$statistic, 2), 
+                    round(skewness(data[,col]), 2),
+                    round(kurtosis(data[,col]), 2),
+                    round(mean(data[,col]>0), 2))
+    
+    colnames(a) <- c('Variables', "n", 'Mean', 'SD', 'T-Statistics',"Skewness", 'Kurtosis', "% Return >0")
+    nout <- rbind(nout, a)
+  }
+  return(nout)
+}
+nout.daily <- stat.sum(ret.daily)
+nout.weekly <- stat.sum(ret.weekly)
+nout.monthly <- stat.sum(ret.monthly)
+nout <- rbind(nout.daily, " ", nout.weekly, " ", nout.monthly)
+
+rownames(nout) <- NULL
+kable1(nout, 'Returns Summary Statistics', font_size = 11)
+```
+Table 2 shows proportion of extreme events for all 4 assets at daily frequency. Gold is the most stable with only 0.24% of dates within 5 years having returns out of $\pm0.5%$. SPX is less stable with 0.88% of dates having returns out of $\pm0.5%$.  The Bitcoin and Ethereum returns have high probabilities of exceptional negative and positive daily returns. The Bitcoin and Ethereum returns have similar characteristics: (1) positively skewed at all frequencies and having high kurtosis; and (2) high probabilities of exceptional negative and positive daily returns.
+
+```{r,echo=FALSE,include=TRUE}
+## generate summary statistics
+crit.sum <- function(var){
+  sign <- var[1]
+  crit <- as.numeric(var[2])
+  a <- data.frame(paste0(sign,  crit*100, "%"), 
+                  ifelse(sign=="<", paste0(round(mean(ret.daily$spx_daily < crit)*100, 2), "%"),
+                          paste0(round(mean(ret.daily$spx_daily > crit)*100,2), "%")),
+                  ifelse(sign=="<", paste0(round(mean(ret.daily$gold_daily < crit)*100, 2), "%"),
+                          paste0(round(mean(ret.daily$gold_daily > crit)*100, 2), "%")),
+                  ifelse(sign=="<", paste0(round(mean(ret.daily$btc_daily < crit)*100, 2), "%"),
+                          paste0(round(mean(ret.daily$btc_daily > crit)*100, 2), "%")),
+                  ifelse(sign=="<", paste0(round(mean(ret.daily$eth_daily < crit)*100, 2), "%"),
+                          paste0(round(mean(ret.daily$eth_daily > crit)*100, 2), "%"))
+  )
+  colnames(a) <- c('Disasters', "p(SPX)", 'p(Gold)', 'p(BTC)', 'p(ETH)')
+  return(a)
+}
+
+sign <- c(rep("<", 4), rep(">", 4))
+value <- c(-0.3, -0.2, -0.1, -0.05, 0.05, 0.1, 0.2, 0.3)
+input <- cbind(sign, value)
+res <- apply(input, 1, crit.sum)
+bigres <- do.call(rbind, res)
+
+rownames(bigres) <- NULL
+kable1(bigres, 'Extreme Events of Daily Returns', font_size = 11)
+```
+## Correlation Analysis
+The covariance matrix of two assets can be written as $$\Sigma = \begin{pmatrix}
+\sigma_{1}^2 & \rho\sigma_1\sigma_2 \\
+\rho\sigma_1\sigma_2 & \sigma_{2}^2
+\end{pmatrix} $$, where $\sigma_i$ is the volatility of asset i. The matrix $\Sigma$ is change with time so does the correlation where $\rho_{1,2,t} = \frac{Cov(X_{1,t}, X_{2,t})}{SD(X_{1,t})SD(X_{2,t})}$. Thus, a challenge question is that how can we know which is the true value of the instantaneous correlation between two assets, as a function of time?
+
+One first solution would be to compute the rolling Pearson correlation coefficient between the returns of both time series. Figure 6 (a) presents the 100-day rolling correlation between returns of SPX and the potential safe-haven instruments: gold, Bitcoin, and Ethereum. We notice that between 2017 and early 2020, the correlations are insignificantly different from 0 in the whole period. Right after COVID-19 outbreak in March 2020, the correlations reaches the highest (0.6 for SPX vs. ETH and 0.54 for SPX vs. BTC). The correlation starts to drop in August 2020 and starts to increase again in October 2021. The increment continues in Apr 2022 where the correlations are as high as 0.47 for BTC vs. SPX and 0.49 for ETH vs. SPX.
+
+Figure 6 (b) plots the log prices of SPX, BTC and ETH. We notice that the correlation increment in March 2020 was corresponding to the price drop due to COVID outbreak. The prices of three assets hitted their lowest point by the end of March and then gradually roared back since April. However, with economies struggling to remain afloat, funds began to move out of stock markets rapidly and pouring into gold and cryptocurrency. espite its highly volatile and speculative nature, new investors saw in it an opportunity to grow wealth at a rate unmatched by any other investment instrument. Thus, since April 2020, Bitcoin's value rose nearly 300 percent by the end of the year. Meanwhile, the correaltion between cryptocurrency and SPX decreases.
+
+Bitcoin's trajectory soared until it reached an all-time high of $63,729 on 3 April 2021. The price increment slowed down and the correlation between stock market index and cryptocurrencies began to increase.
+```{r,echo=FALSE,include=TRUE, tidy=TRUE, message = FALSE, warning = FALSE,  fig.width=10,fig.height=6, fig.align='center', fig.cap = "100 day rolling correlation between SPX and gold, bitcoin as well as ethereum daily returns."}
+cor.fun = function(x){
+  cor(x)[1,2]
+}
+roll.cor.cal <- function(window){
+  rownames(ret.daily) <- ret.daily$date
+  roll.cor.SG = rollapply(as.zoo(ret.daily[,c("gold_daily", "spx_daily")]), FUN=cor.fun, width=window, by.column=FALSE, align="right")
+  
+  roll.cor.SB = rollapply(as.zoo(ret.daily[,c("btc_daily", "spx_daily")]), FUN=cor.fun, width=window, by.column=FALSE, align="right")
+  
+  roll.cor.SE = rollapply(as.zoo(ret.daily[,c("eth_daily", "spx_daily")]), FUN=cor.fun, width=window, by.column=FALSE, align="right")
+  
+  roll.cor <- data.frame(roll.cor.SG, roll.cor.SB, roll.cor.SE)
+  roll.cor$date <- as.Date(rownames(roll.cor))
+  return(roll.cor)
+}
+
+roll.cor <- roll.cor.cal(100)
+
+fig <- plot_ly(roll.cor, x = ~date, y = ~roll.cor.SG, name = 'SPX vs. Gold', type = 'scatter', mode = 'lines', width=800, height=400)
+fig <- fig %>% add_trace(y = ~roll.cor.SB, name = 'SPX vs. BTC', mode = 'lines+markers') 
+fig <- fig %>% add_trace(y = ~roll.cor.SE, name = 'SPX vs. ETH', mode = 'markers')
+fig <- fig %>% layout(xaxis = list(title = "Date"),
+         yaxis = list (title = "Correlation"))
+
+fig2 <- plot_ly(Prices, x = ~ date, y = ~log(SPX_close_price), type = 'scatter', name = 'SPX Prices', mode = 'lines', width=800, height=400)
+fig2 <- fig2 %>% add_trace(y = ~ log(BTC_close_price), name = 'BTC Prices', mode = 'lines+markers') 
+fig2 <- fig2 %>% add_trace(y = ~ log(ETH_close_price), name = 'ETH Prices', mode = 'lines+markers') 
+fig2 <- fig2 %>% layout(xaxis = list(title = "Date"),
+         yaxis = list (title = "Log Price"))
+
+annotations = list( 
+  list( 
+    x = 0.5,  
+    y = 1.0,  
+    text = "(a) 100-day Rolling Correlations ",  
+    xref = "paper",  
+    yref = "paper",  
+    xanchor = "center",  
+    yanchor = "bottom",  
+    showarrow = FALSE 
+  ),  
+  list( 
+    x = 0.5,  
+    y = 0.4,  
+    text = "(b) Prices Change for SPX and BTC",  
+    xref = "paper",  
+    yref = "paper",  
+    xanchor = "center",  
+    yanchor = "bottom",  
+    showarrow = FALSE 
+  ))
+fig <- subplot(fig, fig2,  nrows = 2, titleY = TRUE, titleX = TRUE, margin = 0.1) 
+fig <- fig %>%layout(annotations = annotations) 
+
+fig
+```
+
+
+
+One shortcoming of rolling correlation is that the results is highly sensitive to window of calculation. We plotted the 20-day and 200-day correlations in Figure 7. The correlation plot varies a lot depending on analysis window.
+
+```{r,echo=FALSE,include=TRUE, tidy=TRUE, message = FALSE, warning = FALSE,  fig.width=10,fig.height=6, fig.align='center', fig.cap = "20-day and 200-day rolling correlation between SPX and gold, bitcoin as well as ethereum daily returns."}
+
+roll.cor.20 <- roll.cor.cal(20)
+roll.cor.200 <- roll.cor.cal(200)
+fig <- plot_ly(roll.cor.20, x = ~date, y = ~roll.cor.SG, name = 'SPX vs. Gold', type = 'scatter', mode = 'lines', width=800, height=400)
+fig <- fig %>% add_trace(y = ~roll.cor.SB, name = 'SPX vs. BTC', mode = 'lines+markers') 
+fig <- fig %>% add_trace(y = ~roll.cor.SE, name = 'SPX vs. ETH', mode = 'markers')
+fig <- fig %>% layout(xaxis = list(title = "Date"),
+         yaxis = list (title = "Correlation"))
+
+fig2 <- plot_ly(roll.cor.200, x = ~date, y = ~roll.cor.SG, name = 'SPX vs. Gold', type = 'scatter', mode = 'lines', width=800, height=400)
+fig2 <- fig2 %>% add_trace(y = ~roll.cor.SB, name = 'SPX vs. BTC', mode = 'lines+markers') 
+fig2 <- fig2 %>% add_trace(y = ~roll.cor.SE, name = 'SPX vs. ETH', mode = 'markers')
+fig2 <- fig2 %>% layout(xaxis = list(title = "Date"),
+         yaxis = list (title = "Correlation"))
+
+annotations = list( 
+  list( 
+    x = 0.5,  
+    y = 1.0,  
+    text = "(a) 20-day Rolling Correlations",  
+    xref = "paper",  
+    yref = "paper",  
+    xanchor = "center",  
+    yanchor = "bottom",  
+    showarrow = FALSE 
+  ),  
+  list( 
+    x = 0.5,  
+    y = 0.4,  
+    text = "(b) 200-day Rolling Correlations",  
+    xref = "paper",  
+    yref = "paper",  
+    xanchor = "center",  
+    yanchor = "bottom",  
+    showarrow = FALSE 
+  ))
+fig <- subplot(fig, fig2,  nrows = 2, titleY = TRUE, titleX = TRUE, margin = 0.1) 
+fig <- fig %>%layout(annotations = annotations) 
+fig
+```
+
+
+## DCC-GARCH Model
+As we have noticed from Figure 7 and Figure 8, rolling correlation can vary a lot depending on the sample window, we want to find out which is the best way to uncover the distribution of true dynamic correlation. We use multivariate GARCH model to study the relations between the volatilities and co-volatilities of each of the two assets returns, where the multivariate distribution of the returns can be used directly to compute the implied dynamic correlations. 
+
+DCC-GARCH model allows the conditional-on-past-history covariance matrix where covariance matrix can be modeled as linear combination of lagged covariance matrix and correlation matrix. From the conditional correlation plot by time, the correlation between SPX and BTC/ETH follows similar trend as 100-day rolling correlation, where the correlation reached its maximum in early March and started to decreasing afterwards due to price roaring in cryptocurrency prices. The correlation started to increase again in late 2021 when BTC prices crashed.
+
+Figure 8 plots correlation prediction using the DCC-GARCH model. The true correlation is compared with the predicted values. DCC-GARCH model shows pretty accurate short term prediction while the prediction is off from the as-observed values over long time.
+
+```{r,echo=FALSE,include=TRUE, tidy=TRUE, message = FALSE, warning = FALSE,  fig.width=10,fig.height=4, fig.align='center', fig.cap = "Dynamic correlations using DCC-GARCH model."}
+
+# univariate normal GARCH(1,1) for each series
+garch11.spec = ugarchspec(mean.model = list(armaOrder = c(0,0)), 
+                          variance.model = list(garchOrder = c(1,1), 
+                                                model = "sGARCH"), 
+                          distribution.model = "std")
+
+# dcc specification - GARCH(1,1) for conditional correlations
+dcc.garch11.spec = dccspec(uspec = multispec(replicate(2, garch11.spec) ), 
+                           dccOrder = c(1,1), 
+                           distribution = "mvt")
+
+dcc.fit.SG = dccfit(dcc.garch11.spec, data = ret.daily[ret.daily$date<=as.Date("2022-03-22"), c("gold_daily","spx_daily")])
+cor.SG <- rcor(dcc.fit.SG)[1,2,]
+
+dcc.fit.SB = dccfit(dcc.garch11.spec, data = ret.daily[ret.daily$date<=as.Date("2022-03-22"), c("btc_daily", "spx_daily")])
+cor.SB <- rcor(dcc.fit.SB)[1,2,]
+
+dcc.fit.SE = dccfit(dcc.garch11.spec, data = ret.daily[ret.daily$date<=as.Date("2022-03-22"), c("eth_daily", "spx_daily")])
+cor.SE <- rcor(dcc.fit.SE)[1,2,]
+
+cond.cor <- data.frame(cor.SG, cor.SB, cor.SE)
+cond.cor$date <- as.Date(rownames(cond.cor))
+
+fig <- plot_ly(cond.cor, x = ~date, y = ~cor.SG, name = 'SPX vs. Gold', type = 'scatter', mode = 'lines') 
+fig <- fig %>% add_trace(y = ~cor.SB, name = 'SPX vs. BTC', mode = 'lines+markers') 
+fig <- fig %>% add_trace(y = ~cor.SE, name = 'SPX vs. ETH', mode = 'markers')
+fig <- fig %>% layout(title = "Correlations estimated using DCC-GARCH Model",
+         yaxis = list (title = "Correlation"),
+         xaxis = list (title = ""))
+fig
+```
+```{r,echo=FALSE,include=TRUE, tidy=TRUE, message = FALSE, warning = FALSE,  fig.width=8,fig.height=4, fig.align='center', fig.cap = "Predicted versus observed correlations using DCC-GARCH model using data from 03/23/2022-04/27/2022."}
+dcc.fit.SG0 = dccfit(dcc.garch11.spec, data = ret.daily[, c("gold_daily","spx_daily")])
+cor.SG <- rcor(dcc.fit.SG0)[1,2,][1233:1257]
+
+dcc.fit.SB0 = dccfit(dcc.garch11.spec, data = ret.daily[, c("btc_daily", "spx_daily")])
+cor.SB <- rcor(dcc.fit.SB0)[1,2,][1233:1257]
+
+dcc.fit.SE0 = dccfit(dcc.garch11.spec, data = ret.daily[, c("eth_daily", "spx_daily")])
+cor.SE <- rcor(dcc.fit.SE0)[1,2,][1233:1257]
+
+dcc.pred.SG <- dccforecast(dcc.fit.SG, n.ahead=25)
+cor.pred.SG <- rcor(dcc.pred.SG)$`1973-05-16 20:00:00`[1,2,]
+
+dcc.pred.SB <- dccforecast(dcc.fit.SB, n.ahead=25)
+cor.pred.SB <- rcor(dcc.pred.SB)$`1973-05-16 20:00:00`[1,2,]
+
+dcc.pred.SE <- dccforecast(dcc.fit.SE, n.ahead=25)
+cor.pred.SE <- rcor(dcc.pred.SE)$`1973-05-16 20:00:00`[1,2,]
+
+pred.cor <- data.frame(cor.SG, cor.SB, cor.SE, cor.pred.SG, cor.pred.SB, cor.pred.SE)
+pred.cor$date <- as.Date(rownames(pred.cor))
+
+fig <- plot_ly(pred.cor, x = ~date, y = ~cor.SG, name = 'SPX vs. Gold (observed)', type = 'scatter', mode = 'lines', line = list(color = 'blue', dash = 'solid'))
+fig <- fig %>% add_trace(y = ~cor.pred.SG, name = 'SPX vs. Gold (predicted)', mode = 'lines', line = list(color = 'blue', dash ="dot"))
+
+fig <- fig %>% add_trace(y = ~cor.SB, name = 'SPX vs. BTC (observed)', mode = 'lines', line = list(color = 'orange', dash = 'solid'))
+fig <- fig %>% add_trace(y = ~cor.pred.SB, name = 'SPX vs. BTC (predicted)', mode = 'lines',  line = list(color = 'orange', dash = 'dot'))
+
+
+fig <- fig %>% add_trace(y = ~cor.SE, name = 'SPX vs. ETH (observed)', mode = 'lines',  line = list(color = 'green', dash = 'solid'))
+fig <- fig %>% add_trace(y = ~cor.pred.SE, name = 'SPX vs. ETH (predicted)', mode = 'lines', line = list(color = 'green', dash = 'dot'))
+fig <- fig %>% layout(title = "Observed vs. Predicted Correlations (25 Days)",
+         yaxis = list (title = "Correlation"),
+         xaxis = list (title = ""))
+fig
+```
